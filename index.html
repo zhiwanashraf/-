@@ -1007,7 +1007,7 @@
     <!-- نۆتیفیکەیشنەکانی تۆمارە نوێکان -->
     <div id="activityNotificationModal" class="fixed inset-0 bg-slate-950/75 z-[140] hidden backdrop-blur-sm flex items-center justify-center p-3">
       <div class="custom-modal-bg bg-white w-full max-w-md max-h-[88vh] overflow-y-auto rounded-3xl p-4 shadow-2xl border border-rose-100">
-        <div class="flex items-center justify-between border-b border-slate-100 pb-3 mb-3"><div><h3 class="font-black text-sm text-rose-700">🪄 نۆتیفیکەیشنی تۆمارە نوێکان</h3><p class="text-[10px] text-slate-500 mt-1">تۆمارە نوێکان تا کاتی کردنەوەیان لێرە دەمێننەوە</p></div><div class="flex items-center gap-2"><button id="activityNotificationSoundBtn" type="button" class="w-9 h-9 rounded-full bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center" title="هەڵبژاردنی دەنگی نۆتیفیکەیشن" aria-label="هەڵبژاردنی دەنگی نۆتیفیکەیشن">📢</button><button id="activityNotificationClose" type="button" class="w-8 h-8 rounded-full bg-slate-100 text-slate-600">✕</button></div></div>
+        <div class="flex items-center justify-between border-b border-slate-100 pb-3 mb-3"><div><h3 class="font-black text-sm text-rose-700">🪄 نۆتیفیکەیشنی تۆمارە نوێکان</h3><p class="text-[10px] text-slate-500 mt-1">تۆمارە نوێکان تا کاتی کردنەوەیان لێرە دەمێننەوە</p></div><div class="flex items-center gap-2"><button id="activityNotificationSoundBtn" type="button" class="w-9 h-9 rounded-full bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center" title="هەڵبژاردنی دەنگی نۆتیفیکەیشن" aria-label="هەڵبژاردنی دەنگی نۆتیفیکەیشن">📢</button><button id="activityMarkAllReadBtn" type="button" class="w-9 h-9 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center" title="خوێندنەوەی هەموو نۆتیفیکەیشنەکان" aria-label="خوێندنەوەی هەموو نۆتیفیکەیشنەکان">📿</button><button id="activityNotificationClose" type="button" class="w-8 h-8 rounded-full bg-slate-100 text-slate-600">✕</button></div></div>
         <div id="activityNotificationList" class="space-y-2"></div>
       </div>
     </div>
@@ -2006,9 +2006,41 @@
         function activitySave() {
             try { appStorage.setItem(ACTIVITY_KEY, JSON.stringify(activityEvents)); } catch (e) { console.warn('Activity notification save failed', e); }
         }
+        // لە نێوان Firebase و ئامێرەکاندا نیشانی خوێندنەوەی هەر بەکارهێنەرێک پارێزراو دەمێنێت.
+        // ئەگەر snapshot ـێکی کۆن بگەڕێتەوە، readBy ـی نوێی ناوخۆیی نابێت بسڕێتەوە.
+        // ناسنامەی نۆتیفیکەیشنە خوێندراوەکان لە ناوخۆشدا دەپارێزین؛
+        // بۆ ئەوەی snapshot ـێکی کۆنی Firebase نەتوانێت دووبارەیان پیشان بدات.
+        function activityDismissedKey(userKey = activityUserKey()) { return 'clinicActivityDismissed:' + String(userKey); }
+        function activityGetDismissed(userKey = activityUserKey()) {
+            try { const value = JSON.parse(localStorage.getItem(activityDismissedKey(userKey)) || '[]'); return new Set(Array.isArray(value) ? value.map(String) : []); }
+            catch (_) { return new Set(); }
+        }
+        function activityRememberDismissed(eventId, userKey = activityUserKey()) {
+            const ids = activityGetDismissed(userKey); ids.add(String(eventId));
+            try { localStorage.setItem(activityDismissedKey(userKey), JSON.stringify(Array.from(ids))); } catch (_) {}
+        }
+        function activityMergeReadState(incoming) {
+            const previousById = new Map((Array.isArray(activityEvents) ? activityEvents : []).map(x => [String(x.id), x]));
+            let repaired = false;
+            const merged = (Array.isArray(incoming) ? incoming : []).map(remoteEvent => {
+                const localEvent = previousById.get(String(remoteEvent?.id));
+                const readBy = { ...(remoteEvent?.readBy || {}) };
+                const dismissedBy = { ...(remoteEvent?.dismissedBy || {}) };
+                Object.entries(localEvent?.readBy || {}).forEach(([userKey, isRead]) => {
+                    if (isRead && !readBy[userKey]) { readBy[userKey] = true; repaired = true; }
+                });
+                Object.entries(localEvent?.dismissedBy || {}).forEach(([userKey, isDismissed]) => {
+                    if (isDismissed && !dismissedBy[userKey]) { dismissedBy[userKey] = true; repaired = true; }
+                });
+                // ئەو نۆتیفیکەیشنەی لە ئامێرەکەدا داخراوە، لە کاتی گەڕانەوەی snapshot ـی کۆنیشدا خوێندراوە دەمێنێت.
+                return { ...remoteEvent, readBy, dismissedBy };
+            });
+            return { events: merged, repaired };
+        }
         function activityUnread() {
             const key = activityUserKey();
-            return activityEvents.filter(x => !(x.readBy && x.readBy[key])).sort((a,b) => String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+            const dismissed = activityGetDismissed(key);
+            return activityEvents.filter(x => !(x.readBy && x.readBy[key]) && !(x.dismissedBy && x.dismissedBy[key]) && !dismissed.has(String(x.id))).sort((a,b) => String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
         }
         function activityRefreshBadge() {
             const badge = document.getElementById('activityBadgeCount'); if (!badge) return;
@@ -2027,6 +2059,12 @@
             const root = document.getElementById('activityNotificationList');
             const rows = activityUnread();
             root.innerHTML = rows.length ? rows.map(x => `<button type="button" data-activity-open="${String(x.id).replace(/[^a-zA-Z0-9_-]/g,'')}" class="w-full text-right rounded-2xl border border-rose-100 bg-rose-50/70 hover:bg-rose-100 p-3 transition"><div class="flex items-start gap-3"><span class="w-9 h-9 rounded-xl bg-white text-rose-600 flex items-center justify-center text-lg shadow-sm">🪄</span><span class="min-w-0 flex-1"><b class="block text-xs font-black text-slate-800">${activityEscape(x.name)}</b><span class="block text-[10px] text-slate-600 mt-1">${activityEscape(x.kind)} · تۆمارکەر: ${activityEscape(x.createdBy)}</span>${x.detail?`<span class="block text-[10px] text-emerald-700 mt-1 whitespace-pre-wrap">${activityEscape(x.detail)}</span>`:''}<span class="block text-[9px] text-slate-400 mt-1">${activityEscape(new Date(x.createdAt).toLocaleString('ku-IQ'))}</span></span><span class="text-[9px] text-rose-600 font-black">نوێ</span></div></button>`).join('') : '<div class="text-center py-10"><div class="text-3xl mb-2">✨</div><p class="text-xs font-bold text-slate-500">هیچ نۆتیفیکەیشنێکی نەخوێندراوە نییە</p></div>';
+            const markAllBtn = document.getElementById('activityMarkAllReadBtn');
+            if (markAllBtn) {
+                markAllBtn.disabled = rows.length === 0;
+                markAllBtn.classList.toggle('opacity-40', rows.length === 0);
+                markAllBtn.classList.toggle('cursor-not-allowed', rows.length === 0);
+            }
             activityRefreshBadge();
         }
         function activityEscape(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -2042,7 +2080,12 @@
         document.getElementById('myRecordsList').addEventListener('click',e=>{const b=e.target.closest('[data-my-record]');if(b)activityOpenRecord(b.dataset.myRecord);});
         function activityOpenRecord(eventId) {
             const event = activityEvents.find(x => x.id === eventId); if (!event) return;
-            const key = activityUserKey(); event.readBy = event.readBy || {}; event.readBy[key] = true; activitySave();
+            const key = activityUserKey();
+            event.readBy = event.readBy || {}; event.readBy[key] = true;
+            event.dismissedBy = event.dismissedBy || {}; event.dismissedBy[key] = true;
+            activityRememberDismissed(event.id, key);
+            activitySave();
+            activityRenderList();
             document.getElementById('activityNotificationModal').classList.add('hidden'); activityRefreshBadge();
             switchView(event.targetView || 'dashboard');
             if (event.targetView === 'patients' && typeof patientOpenDetail === 'function') patientOpenDetail(event.recordId);
@@ -2056,6 +2099,17 @@
         const activityModal = document.getElementById('activityNotificationModal');
         document.getElementById('activityNotificationBtn').addEventListener('click', () => { activityRenderList(); activityModal.classList.remove('hidden'); });
         document.getElementById('activityNotificationClose').addEventListener('click', () => activityModal.classList.add('hidden'));
+        document.getElementById('activityMarkAllReadBtn').addEventListener('click', () => {
+            const key = activityUserKey();
+            let changed = false;
+            activityEvents.forEach(event => {
+                event.readBy = event.readBy || {}; event.dismissedBy = event.dismissedBy || {};
+                if (!event.readBy[key] || !event.dismissedBy[key]) { event.readBy[key] = true; event.dismissedBy[key] = true; changed = true; }
+                activityRememberDismissed(event.id, key);
+            });
+            if (changed) activitySave();
+            activityRenderList();
+        });
         activityModal.addEventListener('click', e => { if (e.target === activityModal) activityModal.classList.add('hidden'); });
         document.getElementById('activityNotificationList').addEventListener('click', e => { const btn = e.target.closest('[data-activity-open]'); if (!btn) return; activityOpenRecord(btn.dataset.activityOpen); });
         activityRefreshBadge();
@@ -3472,7 +3526,15 @@
                 if (Array.isArray(d.clinicInfoRecords)) infoRecords = infoEnsureStableRecords(d.clinicInfoRecords);
                 if (Array.isArray(d.clinicBanners)) banners = d.clinicBanners;
                 if (Array.isArray(d.clinicNotifications)) notifications = d.clinicNotifications;
-                if (Array.isArray(d.clinicActivityNotifications)) activityEvents = d.clinicActivityNotifications;
+                if (Array.isArray(d.clinicActivityNotifications)) {
+                    const mergedActivity = activityMergeReadState(d.clinicActivityNotifications);
+                    activityEvents = mergedActivity.events;
+                    // نیشانی خوێندنەوەی ناوخۆیی دووبارە بۆ Firebase دەنێردرێت تا لە snapshot ـی دواتردا ون نەبێت.
+                    if (mergedActivity.repaired) activitySave();
+                    activityRefreshBadge();
+                    const activityModalEl = document.getElementById('activityNotificationModal');
+                    if (activityModalEl && !activityModalEl.classList.contains('hidden')) activityRenderList();
+                }
                 updateBannerDisplay(); updateNotifDisplay(); updateInfoCardDisplay();
                 if (typeof patientRenderAll === 'function') patientRenderAll();
                 if (typeof visitRenderAll === 'function') visitRenderAll();
